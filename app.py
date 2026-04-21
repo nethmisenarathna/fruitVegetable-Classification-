@@ -4,6 +4,11 @@ from tensorflow.keras.models import load_model
 from PIL import Image
 import numpy as np
 
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
 st.set_page_config(
     page_title="Fruit & Vegetable Classifier",
     page_icon="🥕",
@@ -126,6 +131,32 @@ with open("class_names.json") as f:
 # Load model
 model = load_model("fruitveg_resnet_realistic.keras")
 
+
+def remove_background_grabcut(image: Image.Image) -> tuple[Image.Image, bool]:
+    """Return a white-background cutout using GrabCut when OpenCV is available."""
+    if cv2 is None:
+        return image, False
+
+    image_np = np.array(image)
+    bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    mask = np.zeros(bgr.shape[:2], np.uint8)
+    bg_model = np.zeros((1, 65), np.float64)
+    fg_model = np.zeros((1, 65), np.float64)
+
+    h, w = bgr.shape[:2]
+    margin_w = max(1, int(w * 0.05))
+    margin_h = max(1, int(h * 0.05))
+    rect = (margin_w, margin_h, w - 2 * margin_w, h - 2 * margin_h)
+
+    try:
+        cv2.grabCut(bgr, mask, rect, bg_model, fg_model, 4, cv2.GC_INIT_WITH_RECT)
+        fg_mask = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+        white_bg = np.full(image_np.shape, 255, dtype=np.uint8)
+        cutout = image_np * fg_mask[:, :, np.newaxis] + white_bg * (1 - fg_mask[:, :, np.newaxis])
+        return Image.fromarray(cutout.astype(np.uint8)), True
+    except Exception:
+        return image, False
+
 st.markdown(
     """
     <div class='hero'>
@@ -151,6 +182,11 @@ uploaded_file = None
 
 with scan_tab:
     st.markdown("Use your webcam to capture a fresh image.")
+    remove_cam_background = st.checkbox(
+        "Remove camera background (focus on object)",
+        value=True,
+        help="Tries to isolate the fruit/vegetable and replace the background with white.",
+    )
     _, camera_col, _ = st.columns([1, 1.6, 1])
     with camera_col:
         captured_file = st.camera_input("Open camera")
@@ -167,13 +203,23 @@ if input_file:
 
     image = Image.open(input_file).convert("RGB")
 
+    display_image = image
+    prediction_image = image
+    bg_removed_ok = False
+
+    if captured_file is not None and remove_cam_background:
+        prediction_image, bg_removed_ok = remove_background_grabcut(image)
+        display_image = prediction_image
+
     with left_col:
         st.markdown("<div class='panel'>", unsafe_allow_html=True)
         st.subheader(source_label)
-        st.image(image, use_container_width=True)
+        st.image(display_image, use_container_width=True)
+        if captured_file is not None and remove_cam_background and not bg_removed_ok:
+            st.caption("Background removal unavailable. Install OpenCV with: pip install opencv-python")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    img = image.resize((224, 224))
+    img = prediction_image.resize((224, 224))
     img = np.array(img)/255.0
     img = np.expand_dims(img, axis=0)
 
